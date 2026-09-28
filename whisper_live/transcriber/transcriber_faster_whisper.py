@@ -671,6 +671,13 @@ class WhisperModel:
         """The languages supported by the model."""
         return list(_LANGUAGE_CODES) if self.model.is_multilingual else ["en"]
 
+    def _suppressed_tokens(self, tokenizer, suppress_tokens):
+        key = (tokenizer.language_code, tokenizer.task, tuple(suppress_tokens))
+        cache = self.__dict__.setdefault("_suppressed_cache", {})
+        if key not in cache:
+            cache[key] = get_suppressed_tokens(tokenizer, list(suppress_tokens))
+        return cache[key]
+
     def _get_feature_kwargs(self, model_path, preprocessor_bytes=None) -> dict:
         config = {}
         try:
@@ -932,7 +939,7 @@ class WhisperModel:
             prefix=prefix,
             suppress_blank=suppress_blank,
             suppress_tokens=(
-                get_suppressed_tokens(tokenizer, suppress_tokens)
+                self._suppressed_tokens(tokenizer, suppress_tokens)
                 if suppress_tokens
                 else suppress_tokens
             ),

@@ -3,12 +3,53 @@ import json
 import logging
 import threading
 import time
+import numpy as np
 import torch
 import ctranslate2
 from huggingface_hub import snapshot_download
 
 from whisper_live.transcriber.transcriber_faster_whisper import WhisperModel
 from whisper_live.backend.base import ServeClientBase
+
+OPT_5 = os.environ.get("WHISPERLIVE_OPT_1", "1") != "0"
+OPT_6 = os.environ.get("WHISPERLIVE_OPT_2", "1") != "0"
+OPT_7 = os.environ.get("WHISPERLIVE_OPT_3", "1") != "0"
+
+
+class Opt4:
+
+    def __init__(self, fe):
+        self._fe = fe
+        self._opt_11 = torch.from_numpy(np.asarray(fe.mel_filters, dtype=np.float32)).cuda()
+        self._win = torch.hann_window(fe.n_fft, periodic=True, device="cuda")
+
+    @classmethod
+    def wrap(cls, fe):
+        try:
+            gpu = cls(fe)
+            probe = np.random.RandomState(0).randn(16000 * 11).astype(np.float32) * 0.1
+            if gpu(probe).shape == fe(probe).shape:
+                return gpu
+            logging.warning("optimized features differ in shape from faster-whisper's; using the stock path")
+        except Exception as e:
+            logging.warning(f"optimized features unavailable ({e}); using the stock path")
+        return fe
+
+    def __call__(self, waveform, padding=160, chunk_length=None):
+        if chunk_length is not None:
+            return self._fe(waveform, padding=padding, chunk_length=chunk_length)
+        w = torch.from_numpy(np.ascontiguousarray(waveform, dtype=np.float32)).cuda()
+        if padding:
+            w = torch.nn.functional.pad(w, (0, padding))
+        st = torch.stft(w, self._fe.n_fft, self._fe.hop_length, window=self._win, center=True,
+                        pad_mode="reflect", return_complex=True)
+        mel = self._opt_11 @ (st[..., :-1].abs() ** 2)
+        log_spec = torch.clamp(mel, min=1e-10).log10()
+        log_spec = torch.maximum(log_spec, log_spec.max() - 8.0)
+        return ((log_spec + 4.0) / 4.0).cpu().numpy()
+
+    def __getattr__(self, name):
+        return getattr(self._fe, name)
 
 
 class ServeClientFasterWhisper(ServeClientBase):
@@ -19,6 +60,8 @@ class ServeClientFasterWhisper(ServeClientBase):
     BATCH_WORKER_LOCK = threading.Lock()
     # the batched GPU path encodes one 30 s window, longer requests fall back to serial transcribe
     BATCH_MAX_CHUNK_S = 30
+    OPT_9 = {}
+    OPT_10 = threading.Lock()
 
     def __init__(
         self,
@@ -88,6 +131,7 @@ class ServeClientFasterWhisper(ServeClientBase):
         self.initial_prompt = initial_prompt
         self.vad_parameters = vad_parameters or {"threshold": 0.5}
         self.hotwords = hotwords
+        self._opt_13 = None
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
         if device == "cuda":
@@ -109,7 +153,10 @@ class ServeClientFasterWhisper(ServeClientBase):
                             ServeClientFasterWhisper.SINGLE_MODEL = self.transcriber
                 self.transcriber = ServeClientFasterWhisper.SINGLE_MODEL
             else:
-                self.create_model(device)
+                self._opt_12 = (self.model_size_or_path, device, self.compute_type)
+                self.transcriber = self._opt_8(self._opt_12) if OPT_7 else None
+                if self.transcriber is None:
+                    self.create_model(device)
         except Exception as e:
             logging.error(f"Failed to load model: {e}")
             self.websocket.send(json.dumps({
@@ -134,6 +181,22 @@ class ServeClientFasterWhisper(ServeClientBase):
                 }
             )
         )
+
+    @classmethod
+    def _opt_8(cls, key):
+        with cls.OPT_10:
+            idle = cls.OPT_9.get(key)
+            return idle.pop() if idle else None
+
+    def speech_to_text(self):
+        try:
+            super().speech_to_text()
+        finally:
+            key = getattr(self, "_opt_12", None)
+            if OPT_7 and key is not None and getattr(self, "transcriber", None) is not None:
+                self._opt_12 = None
+                with ServeClientFasterWhisper.OPT_10:
+                    ServeClientFasterWhisper.OPT_9.setdefault(key, []).append(self.transcriber)
 
     def create_model(self, device):
         """
@@ -181,6 +244,8 @@ class ServeClientFasterWhisper(ServeClientBase):
             compute_type=self.compute_type,
             local_files_only=False,
         )
+        if device == "cuda" and OPT_6:
+            self.transcriber.feature_extractor = Opt4.wrap(self.transcriber.feature_extractor)
 
     def set_language(self, info):
         """
@@ -248,6 +313,12 @@ class ServeClientFasterWhisper(ServeClientBase):
                 self.set_language(request.info)
             return request.result
 
+        opt_14 = (self.language, self.task, self.initial_prompt, self.use_vad,
+                    self.hotwords, self.word_timestamps, input_sample.shape[0])
+        if (OPT_5 and self._opt_13 is not None and self._opt_13[0] == opt_14
+                and np.array_equal(self._opt_13[1], input_sample)):
+            return self._opt_13[2]
+
         # Original lock-based path (backward compatible)
         if ServeClientFasterWhisper.SINGLE_MODEL:
             ServeClientFasterWhisper.SINGLE_MODEL_LOCK.acquire()
@@ -265,6 +336,8 @@ class ServeClientFasterWhisper(ServeClientBase):
 
         if self.language is None and info is not None:
             self.set_language(info)
+        if OPT_5:
+            self._opt_13 = (opt_14, input_sample, result)
         return result
 
     def handle_transcription_output(self, result, duration):

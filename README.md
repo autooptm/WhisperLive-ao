@@ -1,3 +1,61 @@
+<div align="center">
+  <a href="https://autooptm.com"><img src=".autooptm/logo.png" width="96" alt="AutoOptm"></a>
+
+  <h1>WhisperLive · optimized by <a href="https://autooptm.com">AutoOptm</a></h1>
+
+  <p><b>1.56x faster end to end</b> on the command below, output verified against the stock program.</p>
+
+  <p>
+    <a href="https://autooptm.com"><img alt="speedup" src="https://img.shields.io/badge/end--to--end-1.56x-2ea44f"></a>
+    <a href="https://github.com/autooptm-ai/WhisperLive/commit/809d63d4782f08f0b07719b999fa885af89b13f5"><img alt="base" src="https://img.shields.io/badge/upstream-809d63d4782f-blue"></a>
+    <img alt="card" src="https://img.shields.io/badge/measured%20on-RTX%204090-lightgrey">
+  </p>
+</div>
+
+> This is a fork of [autooptm-ai/WhisperLive](https://github.com/autooptm-ai/WhisperLive) at commit
+> [`809d63d4782f`](https://github.com/autooptm-ai/WhisperLive/commit/809d63d4782f08f0b07719b999fa885af89b13f5) with the AutoOptm patch applied on top.
+> The optimisation was found, measured and verified automatically by [AutoOptm](https://autooptm.com);
+> the patch is also kept at [`.autooptm/autooptm.patch`](.autooptm/autooptm.patch).
+
+## The result
+
+| | |
+|---|---|
+| **Command** | `python ao_bench.py` |
+| **Entry point** | `ao_bench.py` |
+| **Unit measured** | one clip streamed to the repository's faster_whisper server (Whisper small, float16) over a fresh websocket session: first packet → the transcript that covers the clip → end of audio and close; the clips are speed-perturbed copies of `assets/jfk.flac`, run as `--units 64` |
+| **Before (stock)** | 1,981 ms per clip on average (124.8 s for the 63 timed clips) |
+| **After (this tree, all switches default ON)** | 1,268 ms per clip on average (79.9 s for the 63 timed clips; server start-up and the first warm-up clips are not included, for either side) |
+| **Speedup** | **1.56x** end to end on RTX 4090, noise floor of the host 0.2% |
+| **Output** | every transcript identical to the stock program's, word for word; verified on the pinned clips and on a held-out set the optimiser never saw |
+
+### What changed
+
+| File | Where | Gain (alone) |
+|---|---|---|
+| `whisper_live/backend/faster_whisper_backend.py` | ServeClientFasterWhisper.__init__ / speech_to_text | — |
+| `whisper_live/backend/faster_whisper_backend.py` | ServeClientFasterWhisper.transcribe_audio | 1.24x |
+| `whisper_live/backend/faster_whisper_backend.py` | ServeClientFasterWhisper.create_model | 1.038x |
+| `whisper_live/transcriber/transcriber_faster_whisper.py` | WhisperModel._suppressed_tokens / transcribe | 1.013x |
+
+## Reproduce
+
+```bash
+git clone https://github.com/autooptm/WhisperLive-ao.git
+cd WhisperLive-ao
+# set up exactly as upstream documents (pip install -r requirements/server.txt), then:
+python ao_bench.py
+```
+
+The diff against upstream is one commit: `git log -1 -p` shows it, and
+`git diff 809d63d4782f` is the same patch as `.autooptm/autooptm.patch`.
+
+---
+
+<div align="center"><sub>Optimized by <a href="https://autooptm.com">AutoOptm</a> — point it at a repository, get back a verified speedup and the patch.</sub></div>
+
+---
+
 # WhisperLive
 
 <h2 align="center">
